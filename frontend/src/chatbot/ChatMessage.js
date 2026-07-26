@@ -37,4 +37,4 @@ const ChatMessage = ({ role, text, imageUrls = [] }) => {
   );
 };
 
-export default ChatMessage;
+export default React.memo(ChatMessage);

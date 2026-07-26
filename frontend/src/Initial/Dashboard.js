@@ -3,6 +3,7 @@ import './Dashboard.css';
 import Placecard from './Placecard';
 import filterByDistricts from '../Essentials/essentials';
 import { motion } from "framer-motion";
+import config from '../config';
 
 const Dashboard = () => {
   // State to hold local items
@@ -20,10 +21,11 @@ const Dashboard = () => {
   const [districtPages, setDistrictPages] = useState({});
 
   // Fetch heritage places from backend on component mount
-useEffect(() => {
+  useEffect(() => {
     const fetchPlaces = async () => {
       try {
-        const response = await fetch(`${process.env.REACT_APP_API_URL}/api/places`);
+        const API_BASE = config.apiURL;
+        const response = await fetch(`${API_BASE}/api/places`);
         if (!response.ok) throw new Error('Failed to fetch places');
         const data = await response.json();
         setHeritagePlaces(data);
@@ -71,7 +73,7 @@ useEffect(() => {
   // Show loading animation while fetching
   if (loading)
     return (
-    <div className="typing">
+      <div className="typing">
         <span></span>
         <span></span>
         <span></span>
@@ -86,9 +88,9 @@ useEffect(() => {
   const paginatedPlaces =
     mode === "places"
       ? data.slice(
-          currentPage * placesPerPage,
-          currentPage * placesPerPage + placesPerPage
-        )
+        currentPage * placesPerPage,
+        currentPage * placesPerPage + placesPerPage
+      )
       : [];
 
   return (

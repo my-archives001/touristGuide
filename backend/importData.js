@@ -1,11 +1,9 @@
 const mongoose = require('mongoose');
-const dotenv = require('dotenv');
 const heritagePlaces = require('./data.js');
 const Place = require('./models/placeModel.js');
+const config = require('./config/config.js');
 
-dotenv.config();
-
-mongoose.connect(process.env.MONGO_URI)
+mongoose.connect(config.mongoURI)
 .then(() => {
     console.log('MongoDB Connected for data import...');
     importPlaces();

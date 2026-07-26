@@ -463,3 +463,27 @@ textarea {
 .info-right li {
   margin-bottom: 10px;
 }
+/* ---------- Responsive Media Queries ---------- */
+@media (max-width: 768px) {
+  .user-page-main-split {
+    flex-direction: column;
+    height: auto;
+  }
+  
+  .chatbot-left {
+    max-width: 100%;
+    margin-bottom: 20px;
+  }
+  
+  .info-right {
+    max-width: 100%;
+  }
+  
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+  
+  .profile-card {
+    width: 90%;
+  }
+}

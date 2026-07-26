@@ -2,15 +2,16 @@ import React, { useContext, useState } from "react";
 import ChatbotIcon from "./ChatbotIcon";
 import ChatMessage from "./ChatMessage";
 import "./Chatbot.css";
-import {v4 as uuidv4} from "uuid";
+import { v4 as uuidv4 } from "uuid";
 import { AuthContext } from "../context/AuthContext.js";
+import { aiService } from "../services/apiService";
 
 const Chatbot = ({ setAiData }) => {
   const [conversationId] = useState(uuidv4());
 
-  const {userInfo} = useContext(AuthContext);
+  const { userInfo } = useContext(AuthContext);
   const userId = userInfo ? userInfo._id : "default-user";
-  
+
   const [userPrompt, setUserPrompt] = useState('');
   const [messages, setMessages] = useState([
     { role: "model", text: "Hey there 👋 How can I help you today?" }
@@ -39,18 +40,7 @@ const Chatbot = ({ setAiData }) => {
     setMessages((prev) => [...prev, loadingMessage]);
 
     try {
-      const response = await fetch("http://localhost:5001/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: trimmedPrompt,
-          userId: userId,
-          conversationId: conversationId
-        }),
-      });
-
-      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-      const aiResponse = await response.json();
+      const aiResponse = await aiService.sendChat(trimmedPrompt, userId, conversationId);
       console.log("AI RESPONSE ===>", aiResponse);
 
       // Build array of image URLs from sources (if present)
@@ -111,7 +101,7 @@ const Chatbot = ({ setAiData }) => {
             key={index}
             role={msg.role}
             text={msg.text}
-            imageUrls={msg.imageUrls || []} 
+            imageUrls={msg.imageUrls || []}
           />
         ))}
       </div>

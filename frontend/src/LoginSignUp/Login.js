@@ -3,10 +3,10 @@ import "./LoginSignUp.css";
 import { toast } from 'react-toastify';
 import back from '../images/left-arrow.png';
 import { AuthContext } from '../context/AuthContext.js';
+import { authService } from '../services/apiService';
 
 const Login = ({
   handleSignUp,
-  setIsUserLogged,
   setJustLoggedIn,
   setLoadSpinner,
   setIsLogInClicked
@@ -24,71 +24,59 @@ const Login = ({
 
   // Update state on input change
   const handleChange = (e) => {
-    setEnteredLoginInfo({...enteredLoginInfo, [e.target.name]: e.target.value});
+    setEnteredLoginInfo({ ...enteredLoginInfo, [e.target.name]: e.target.value });
   }
 
   // Show toast notification for login error
-  const logInErrorToast = () => {
-      toast.dismiss();
-      toast.error(
-        <div>
-          <div style={{ fontSize: '0.9em', marginTop: '4px' }}>
-            Invalid Credentials!
-          </div>
-        </div>,
-        {
-          position: "top-right",
-          autoClose: 2500,
-          closeOnClick: true,
-          pauseOnHover: true,
-          draggable: true,
-          style: {
-            backgroundColor: "#fee2e2",
-            color: "#991b1b",
-            borderRadius: "16px",
-            fontSize: "1rem",
-            fontWeight: "500",
-          },
-          containerId: "below-header",
-        }
-      );
-    };
+  const logInErrorToast = (message) => {
+    toast.dismiss();
+    toast.error(
+      <div>
+        <div style={{ fontSize: '0.9em', marginTop: '4px' }}>
+          {message || 'Invalid Credentials!'}
+        </div>
+      </div>,
+      {
+        position: "top-right",
+        autoClose: 2500,
+        closeOnClick: true,
+        pauseOnHover: true,
+        draggable: true,
+        style: {
+          backgroundColor: "#fee2e2",
+          color: "#991b1b",
+          borderRadius: "16px",
+          fontSize: "1rem",
+          fontWeight: "500",
+        },
+        containerId: "below-header",
+      }
+    );
+  };
 
   // Handle form submission and API call
   const handleSubmit = async (e) => {
     e.preventDefault();
 
     try {
-      const response = await fetch(`${process.env.REACT_APP_API_URL}/api/users/login`,{
-        method:'POST',
-        headers: {
-          'Content-Type' : 'application/json',
-        },
-        body: JSON.stringify({
-          email: enteredLoginInfo.email,
-          securityPin: enteredLoginInfo.securityPin,
-        }),
+      const data = await authService.login({
+        email: enteredLoginInfo.email,
+        securityPin: enteredLoginInfo.securityPin,
       });
 
-      const data = await response.json();
+      // Storing the token and user ID from the backend response
+      localStorage.setItem('token', data.token);
+      localStorage.setItem('userId', data._id);
 
-      if(response.ok) {
-        // Storing the token and user ID from the backend response
-        localStorage.setItem('token', data.token);
-        localStorage.setItem('userId', data._id);
+      // Update the global AuthContext state immediately 
+      login(data);
 
-        // Update the global AuthContext state immediately 
-        login(data);
-
-        setLoadSpinner(true);
-        setLoginSuccess(true);
-
-      } else {
-        logInErrorToast();
-      }
+      setLoadSpinner(true);
+      setLoginSuccess(true);
     } catch (error) {
       console.error('Login error: ', error);
-      logInErrorToast();
+      const msg = error.response?.data?.message || 'Invalid Credentials!';
+      logInErrorToast(msg);
     }
   };
 
@@ -101,13 +89,12 @@ const Login = ({
       timer = setTimeout(() => {
         setLoadSpinner(false);
         setJustLoggedIn(true);
-        setIsUserLogged(true);
         setIsLogInClicked(false);
       }, 3000);
     }
 
     return () => clearTimeout(timer);
-  }, [loginSuccess, setLoadSpinner, setIsUserLogged, setJustLoggedIn, setIsLogInClicked]);
+  }, [loginSuccess, setLoadSpinner, setJustLoggedIn, setIsLogInClicked]);
 
   return (
     <div className="login-container">
@@ -136,8 +123,9 @@ const Login = ({
             <input
               type="password"
               name="securityPin"
-              placeholder="Security PIN"
+              placeholder="Security PIN (min 8 chars)"
               onChange={handleChange}
+              minLength={8}
               required
             />
             <input type="submit" value="Login" />
@@ -148,7 +136,7 @@ const Login = ({
       {/* Footer to enable sign up */}
       <footer className="foot">
         <p>Don't have an account ? </p>
-        <button onClick={ handleSignUp }>Sign Up</button>
+        <button onClick={handleSignUp}>Sign Up</button>
       </footer>
     </div>
   );

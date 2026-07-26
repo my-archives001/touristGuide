@@ -1,8 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 
 const TypingEffect = ({ text, speed = 40, onComplete }) => {
   // State to hold currently displayed substring of the full text
   const [displayed, setDisplayed] = useState('');
+  // Use ref to avoid onComplete causing re-renders
+  const onCompleteRef = useRef(onComplete);
+  onCompleteRef.current = onComplete;
 
   useEffect(() => {
     let i = 0;
@@ -13,7 +16,7 @@ const TypingEffect = ({ text, speed = 40, onComplete }) => {
       if (i >= text.length) {
         // Stop timer and invoke onComplete callback when done
         clearInterval(timer);
-        if (onComplete) onComplete();
+        if (onCompleteRef.current) onCompleteRef.current();
         return;
       }
 
@@ -27,7 +30,7 @@ const TypingEffect = ({ text, speed = 40, onComplete }) => {
 
     // Cleanup interval timer on component unmount or when dependencies change
     return () => clearInterval(timer);
-  }, [text, speed, onComplete]);
+  }, [text, speed]); // onComplete removed — using ref instead
 
   return (
     <p

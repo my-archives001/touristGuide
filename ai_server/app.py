@@ -1,9 +1,27 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from pydantic import ValidationError
 import math
+import os
+import random
+
+from config import config
+from constants import constants
+from models import RoutePlanRequest, PathFindRequest
+from security import check_flask_rate_limit
+from logger import setup_flask_logging, get_logger
 
 app = Flask(__name__)
-CORS(app)
+
+# Apply observability and logging hooks
+setup_flask_logging(app, service_name="python-route-planner")
+route_logger = get_logger("python-route-planner")
+
+# Apply rate limiter hook before each request
+app.before_request(check_flask_rate_limit)
+
+# CORS — restrict to allowed origins
+CORS(app, origins=config.CORS_ORIGINS, supports_credentials=True)
 
 districts_data = {
    "thanjavur": {
@@ -96,7 +114,7 @@ districts_data = {
 def haversine(coord1, coord2):
     lat1, lon1 = coord1
     lat2, lon2 = coord2
-    R = 6371  # Earth radius in km
+    R = constants.EARTH_RADIUS_KM  # Earth radius in km
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
     dlambda = math.radians(lon2 - lon1)
@@ -121,9 +139,13 @@ def get_district_data(district):
 
 @app.route("/api/plan-route", methods=["POST"])
 def plan_route():
-    data = request.get_json()
-    district = data.get("district")
-    start = data.get("start")  # user-specified start
+    try:
+        req_data = RoutePlanRequest.parse_obj(request.get_json() or {})
+    except ValidationError as e:
+        return jsonify({"error": "Validation failed", "details": e.errors()}), 400
+
+    district = req_data.district
+    start = req_data.start
     if district not in districts_data:
         return jsonify({"error": "Invalid district"}), 400
 
@@ -133,7 +155,6 @@ def plan_route():
     if start and start in names:
         pass  # use user start
     else:
-        import random
         start = random.choice(names)  # fallback
 
     unvisited = set(names)
@@ -159,10 +180,14 @@ def plan_route():
 
 @app.route("/api/find-path", methods=["POST"])
 def find_path():
-    data = request.get_json()
-    district = data.get("district")
-    start = data.get("start")
-    end = data.get("end")
+    try:
+        req_data = PathFindRequest.parse_obj(request.get_json() or {})
+    except ValidationError as e:
+        return jsonify({"error": "Validation failed", "details": e.errors()}), 400
+
+    district = req_data.district
+    start = req_data.start
+    end = req_data.end
 
     if district not in districts_data:
         return jsonify({"error": "District not found"}), 404
@@ -197,7 +222,7 @@ def find_path():
             continue
         px, py = coord[1], coord[0]
         dist_from_line = perpendicular_distance(px, py)
-        if dist_from_line <= 10:  # within 10 km
+        if dist_from_line <= constants.ROUTE_MAX_PERPENDICULAR_DIST_KM:  # within threshold km
             t = projection_factor(px, py)
             nearby_points.append((t, name))
 
@@ -215,10 +240,11 @@ def find_path():
         "path": path,
         "path_coords": [coords[p] for p in path],
         "total_distance_km": round(total_distance, 2),
-        "estimated_time_minutes": round((total_distance / 40) * 60, 1),
+        "estimated_time_minutes": round((total_distance / constants.ROUTE_DEFAULT_SPEED_KMPH) * 60, 1),
         "intermediate_sites": path[1:-1]
     })
 
 # ---- Run Server ---- #
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    route_logger.info(f"Starting Python Route Planner server on http://{config.FLASK_HOST}:{config.FLASK_PORT}")
+    app.run(host=config.FLASK_HOST, port=config.FLASK_PORT, debug=config.FLASK_DEBUG)

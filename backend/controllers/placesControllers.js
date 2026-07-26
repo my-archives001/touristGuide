@@ -1,10 +1,19 @@
-// controllers/placesControllers.js
 const Place = require('../models/placeModel');
+const { HTTP_STATUS, VALIDATION_LIMITS, MESSAGES } = require('../config');
 
-// Fetch all places
+// Fetch all places (with pagination support)
 exports.getAllPlaces = async (req, res) => {
   try {
-    const places = await Place.find({}, '-image.data').lean(); // Exclude large binary data
+    const page = parseInt(req.query.page) || VALIDATION_LIMITS.DEFAULT_PAGE;
+    const limit = parseInt(req.query.limit) || VALIDATION_LIMITS.DEFAULT_LIMIT;
+    const skip = (page - 1) * limit;
+
+    const totalCount = await Place.countDocuments();
+    const places = await Place.find({}, '-image.data')
+      .lean()
+      .skip(skip)
+      .limit(limit);
+
     const host = req.get('host');
     const protocol = req.protocol;
 
@@ -20,10 +29,10 @@ exports.getAllPlaces = async (req, res) => {
       return p;
     });
 
-    res.status(200).json(mapped);
+    res.status(HTTP_STATUS.OK).json(mapped);
   } catch (err) {
     console.error('Error fetching places:', err);
-    res.status(500).json({ message: 'Server error' });
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ message: MESSAGES.SERVER_ERROR });
   }
 };
 
@@ -31,7 +40,7 @@ exports.getAllPlaces = async (req, res) => {
 exports.getPlaceImage = async (req, res) => {
   try {
     const place = await Place.findById(req.params.id).lean();
-    if (!place) return res.status(404).json({ message: 'Place not found' });
+    if (!place) return res.status(HTTP_STATUS.NOT_FOUND).json({ message: 'Place not found' });
 
     if (place.image && place.image.data) {
       const contentType = place.image.contentType || 'image/jpeg';
@@ -46,9 +55,9 @@ exports.getPlaceImage = async (req, res) => {
       return res.redirect(place.imageUrl);
     }
 
-    return res.status(404).json({ message: 'Image not found' });
+    return res.status(HTTP_STATUS.NOT_FOUND).json({ message: 'Image not found' });
   } catch (err) {
     console.error('Error fetching image:', err);
-    res.status(500).json({ message: 'Server error' });
+    res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({ message: MESSAGES.SERVER_ERROR });
   }
 };

@@ -1,5 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { toast } from 'react-toastify';
+import config from '../../config';
+import { profileService } from '../../services/apiService';
+
+const API_BASE = config.apiURL;
 
 const SetProfile = ({ setProfileSet, setViewProfile, setProfileUpdated, token }) => {
 
@@ -20,7 +24,7 @@ const SetProfile = ({ setProfileSet, setViewProfile, setProfileUpdated, token })
         const fetchUserData = async () => {
             try {
                 // Fetch basic user info
-                const userResponse = await fetch(`${process.env.REACT_APP_API_URL}/api/users/profile`, {
+                const userResponse = await fetch(`${API_BASE}/api/users/profile`, {
                     method: 'GET',
                     headers: {
                         'Authorization': `Bearer ${token}`
@@ -30,7 +34,7 @@ const SetProfile = ({ setProfileSet, setViewProfile, setProfileUpdated, token })
                 const userData = await userResponse.json();
 
                 // Fetch additional profile data
-                const profileResponse = await fetch(`${process.env.REACT_APP_API_URL}/api/profile`, {
+                const profileResponse = await fetch(`${API_BASE}/api/profile`, {
                     method: 'GET',
                     headers: {
                         'Authorization': `Bearer ${token}`
@@ -99,6 +103,33 @@ const SetProfile = ({ setProfileSet, setViewProfile, setProfileUpdated, token })
         );
     };
 
+    // Toast to show error message when profile update fails
+    const ErrorToast = (msg = 'Failed to update profile') => {
+        toast.dismiss();
+        toast.error(
+            <div>
+                <div style={{ fontSize: '0.9em', marginTop: '4px' }}>
+                    {msg}
+                </div>
+            </div>,
+            {
+                position: "top-right",
+                autoClose: 2500,
+                closeOnClick: true,
+                pauseOnHover: true,
+                draggable: true,
+                style: {
+                    backgroundColor: "#fee2e2",
+                    color: "#991b1b",
+                    borderRadius: "16px",
+                    fontSize: "1rem",
+                    fontWeight: "500",
+                },
+                containerId: "below-header",
+            }
+        );
+    };
+
     // Handle input changes and update state
     const handleChange = (e) => {
         setProfile({ ...profile, [e.target.name]: e.target.value });
@@ -108,30 +139,20 @@ const SetProfile = ({ setProfileSet, setViewProfile, setProfileUpdated, token })
     const handleSave = async (e) => {
         e.preventDefault();
         try {
-            const response = await fetch(`${process.env.REACT_APP_API_URL}/api/profile`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`,
-                },
-                body: JSON.stringify({
-                    phone: profile.phone,
-                    age: profile.age,
-                    gender: profile.gender,
-                    hometown: profile.hometown,
-                    interests: profile.interests,
-                }),
+            await profileService.updateProfile({
+                phone: profile.phone,
+                age: profile.age,
+                gender: profile.gender,
+                hometown: profile.hometown,
+                interests: profile.interests,
             });
-            if (response.ok) {
-                SuccessToast();
-                setProfileSet(false);
-                setViewProfile(true);
-                setProfileUpdated(prev => !prev);
-            } else {
-                console.error('Failed to save profile.');
-            }
+            SuccessToast();
+            setProfileSet(false);
+            setViewProfile(true);
+            setProfileUpdated((prev) => !prev);
         } catch (error) {
-            console.log('Network error:', error);
+            console.error('Error saving profile:', error);
+            ErrorToast();
         }
     };
 

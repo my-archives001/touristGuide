@@ -1,0 +1,107 @@
+services:
+  # 1. Node.js Express Backend Service
+  node-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: thamizh-thadam-node-backend
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - PORT=5000
+    networks:
+      - heritage-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:5000/ping || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # 2. Python FastAPI AI Bot Server
+  ai-bot-server:
+    build:
+      context: ./ai_server
+      dockerfile: Dockerfile.bot
+    container_name: thamizh-thadam-ai-bot
+    restart: unless-stopped
+    ports:
+      - "5001:5001"
+    env_file:
+      - .env
+    environment:
+      - FASTAPI_PORT=5001
+      - FASTAPI_HOST=0.0.0.0
+      - MONGO_URI=${MONGO_URI}
+    networks:
+      - heritage-net
+    depends_on:
+      node-backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # 3. Python Flask Route Planner Server
+  route-planner-server:
+    build:
+      context: ./ai_server
+      dockerfile: Dockerfile.route
+    container_name: thamizh-thadam-route-planner
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - FLASK_PORT=8000
+      - FLASK_HOST=0.0.0.0
+    networks:
+      - heritage-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/districts"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # 4. React 18 + Nginx Static Frontend Service
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - REACT_APP_API_URL=http://localhost:5000
+        - REACT_APP_AI_URL=http://localhost:5001
+        - REACT_APP_ROUTE_URL=http://localhost:8000
+    container_name: thamizh-thadam-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    networks:
+      - heritage-net
+    depends_on:
+      node-backend:
+        condition: service_healthy
+      ai-bot-server:
+        condition: service_healthy
+      route-planner-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:80/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+networks:
+  heritage-net:
+    driver: bridge
+    name: thamizh-thadam-network

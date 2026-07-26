@@ -1,0 +1,37 @@
+# Enterprise Production Dockerfile for Python Flask Route Planner Server
+FROM python:3.11-slim
+
+# Prevent Python from writing .pyc files and enable unbuffered logging
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV FLASK_PORT=8000
+ENV FLASK_HOST=0.0.0.0
+
+WORKDIR /app
+
+# Install essential runtime tools for healthchecks
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python requirements
+COPY requirements.txt ./
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy backend source code
+COPY . .
+
+# Create unprivileged system user for container security
+RUN useradd -m -u 1002 routeuser && chown -R routeuser:routeuser /app
+USER routeuser
+
+# Expose Flask service port
+EXPOSE 8000
+
+# Healthcheck configuration
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD curl -f http://localhost:8000/api/districts || exit 1
+
+# Launch production Flask server
+CMD ["python", "app.py"]

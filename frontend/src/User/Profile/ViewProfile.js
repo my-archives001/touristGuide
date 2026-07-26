@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 // import Spinner from '../../Essentials/Spinner';
+import { profileService } from '../../services/apiService';
 
 const ViewProfile = ({ setProfileSet, setViewProfile, profileUpdated, token }) => {
 
@@ -16,21 +17,10 @@ const ViewProfile = ({ setProfileSet, setViewProfile, profileUpdated, token }) =
       const startTime = Date.now(); // Track fetch start time for consistent spinner
 
       try {
-        const response = await fetch(`${process.env.REACT_APP_API_URL}/api/profile`, {
-          method: 'GET',
-          headers: {
-            'Authorization': `Bearer ${token}`
-          }
-        });
-
-        if (response.ok) {
-          const data = await response.json();
-          setProfile(data);
-        } else {
-          console.error('Failed to fetch profile');
-        }
+        const data = await profileService.getProfile();
+        setProfile(data);
       } catch (error) {
-        console.error('Network error:', error);
+        console.error('Failed to fetch profile:', error);
       } finally {
         // Ensure spinner shows at least 3 seconds for UX consistency
         const elapsed = Date.now() - startTime;
@@ -50,13 +40,13 @@ const ViewProfile = ({ setProfileSet, setViewProfile, profileUpdated, token }) =
 
   // Show loading animation while fetching profile
   if (loading)
-      return (
+    return (
       <div className="typing">
-          <span></span>
-          <span></span>
-          <span></span>
-        </div>
-      );
+        <span></span>
+        <span></span>
+        <span></span>
+      </div>
+    );
 
   // Handle case where profile data is not available
   if (!profile) {

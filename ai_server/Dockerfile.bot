@@ -1,0 +1,37 @@
+# Enterprise Production Dockerfile for Python FastAPI AI Bot Server
+FROM python:3.11-slim
+
+# Prevent Python from writing .pyc files and enable unbuffered logging
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV FASTAPI_PORT=5001
+ENV FASTAPI_HOST=0.0.0.0
+
+WORKDIR /app
+
+# Install essential runtime tools for healthchecks
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python requirements
+COPY requirements.txt ./
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy backend source code
+COPY . .
+
+# Create unprivileged system user for container security
+RUN useradd -m -u 1001 aiuser && chown -R aiuser:aiuser /app
+USER aiuser
+
+# Expose FastAPI service port
+EXPOSE 5001
+
+# Healthcheck configuration
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD curl -f http://localhost:5001/api/health || exit 1
+
+# Launch production ASGI server
+CMD ["python", "bot_server.py"]

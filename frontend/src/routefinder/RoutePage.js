@@ -4,6 +4,7 @@ import PlanRoute from "./PlanRoute";
 import PathFinder from "./PathFinder";
 import MapView from "./MapView";
 import GraphView from "./GraphView";
+import { routeService } from "../services/apiService";
 
 export default function RoutePage() {
   const [districts, setDistricts] = useState([]);
@@ -13,11 +14,11 @@ export default function RoutePage() {
   const [pathResult, setPathResult] = useState(null);
   const [viewMode, setViewMode] = useState("map");
   const [startPlace, setStartPlace] = useState("");
+  const [loading, setLoading] = useState(false);
 
   // Fetch all districts
   useEffect(() => {
-    fetch("http://localhost:8000/api/districts")
-      .then((r) => r.json())
+    routeService.getDistricts()
       .then(setDistricts)
       .catch((err) => console.error("Error loading districts:", err));
   }, []);
@@ -29,22 +30,18 @@ export default function RoutePage() {
     setPathResult(null);
     setStartPlace("");
 
-    fetch(`http://localhost:8000/api/district/${district}`)
-      .then((r) => r.json())
+    routeService.getDistrictData(district)
       .then(setDistrictData)
       .catch((err) => console.error("Error fetching district data:", err));
   }, [district]);
 
   const handlePlanRoute = () => {
     if (!district || !startPlace) return;
-    fetch("http://localhost:8000/api/plan-route", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ district, start: startPlace }),
-    })
-      .then((r) => r.json())
+    setLoading(true);
+    routeService.planRoute(district, startPlace)
       .then((plan) => setPlanResult(plan))
-      .catch((err) => console.error("Error planning route:", err));
+      .catch((err) => console.error("Error planning route:", err))
+      .finally(() => setLoading(false));
   };
 
   return (
@@ -63,25 +60,25 @@ export default function RoutePage() {
         {districtData && (
           <div className="card">
             <div className="selector">
-                <label>Start </label>
-                <select
+              <label>Start </label>
+              <select
                 value={startPlace}
                 onChange={(e) => setStartPlace(e.target.value)}
-                >
+              >
                 <option value="">Select a Start Place</option>
                 {Object.keys(districtData.coords).map((name) => (
-                    <option key={name} value={name}>
+                  <option key={name} value={name}>
                     {name}
-                    </option>
+                  </option>
                 ))}
-                </select>
+              </select>
             </div>
             <button className='btn'
-              disabled={!startPlace}
+              disabled={!startPlace || loading}
               onClick={handlePlanRoute}
               style={{ marginTop: "8px" }}
             >
-              Plan Route
+              {loading ? 'Planning...' : 'Plan Route'}
             </button>
           </div>
         )}

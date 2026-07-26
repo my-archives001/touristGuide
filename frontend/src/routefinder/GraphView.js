@@ -6,7 +6,6 @@ export default function GraphView({ districtData, pathResult }) {
 
   useEffect(() => {
     if (!districtData?.coords) return;
-    console.log(districtData);
     const coords = districtData.coords;
     const width = 800;
     const height = 400;

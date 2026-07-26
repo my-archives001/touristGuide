@@ -13,4 +13,4 @@ const RecentlyVisited = ({place}) => {
     )
 }
 
-export default RecentlyVisited;
+export default React.memo(RecentlyVisited);

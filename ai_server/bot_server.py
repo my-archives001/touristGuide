@@ -5,21 +5,16 @@ import os, json, asyncio, hashlib, logging, math, time, re, sys
 from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional
 import numpy as np
-from sentence_transformers import SentenceTransformer, util
 import httpx
 from concurrent.futures import ThreadPoolExecutor
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
-from transformers import BertTokenizerFast, EncoderDecoderModel
 from gtts import gTTS
-from google.cloud import texttospeech
 import wikipedia
 import tempfile
 from wikipedia import exceptions as wiki_exceptions
 from sklearn.metrics.pairwise import cosine_similarity
 from statistics import mean
 import datetime
-from pymongo import MongoClient # <-- IMPORTED MONGO
+from pymongo import MongoClient
 
 logging.basicConfig(level=logging.INFO)
 
@@ -32,25 +27,26 @@ load_dotenv()
 # Model & Global Vars Initializations
 # =======================================================================
 
-# --- LLM and Embedder Config ---
-EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-embedder = SentenceTransformer(EMBED_MODEL)
+from config import config
 
 # --- OpenRouter Config ---
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_API_KEY = config.OPENROUTER_API_KEY
 if not OPENROUTER_API_KEY:
     raise RuntimeError("Set OPENROUTER_API_KEY in environment")
-OPENROUTER_MODEL = "tngtech/deepseek-r1t2-chimera:free" # Using the free model you chose
+
+# Define the NVIDIA Stack
+PLANNER_MODEL = config.PLANNER_MODEL
+EMBED_MODEL = config.EMBED_MODEL
+SUMMARIZER_MODEL = config.SUMMARIZER_MODEL
 
 # --- MongoDB Connection ---
-MONGO_URI = os.getenv("MONGO_URI")
+MONGO_URI = config.MONGO_URI
 if not MONGO_URI:
     raise RuntimeError("Set MONGO_URI in .env file")
 
 try:
     client = MongoClient(MONGO_URI)
-    # Assumes your DB is named 'TouristGuideSRP' from your files
-    db = client.TouristGuideSRP 
+    db = client.get_default_database(config.MONGO_DB_NAME)
     places_collection = db.places
     print("✅ Connected to MongoDB.")
 except Exception as e:
@@ -58,30 +54,20 @@ except Exception as e:
     sys.exit(1)
 
 
+from constants import constants
+from models import ChatRequest, AIResponse
+from security import FastAPIRateLimitMiddleware
+from logger import get_logger, FastAPILoggingMiddleware
+
+ai_logger = get_logger("python-ai-server")
+
 # --- Session & Cache Config ---
 SESSION_STORE: Dict[str, Dict[str, Any]] = {}
 EMBED_CACHE: Dict[str, List[float]] = {}
-MAX_SESSION_MESSAGES = 10
-ALLOWED_TOOLS = {"retrieve", "summarize", "translate", "tts", "recommend", "caption", "embed"}
-
-# --- Summarizer & TTS Config ---
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Using device:", device)
-
-tokenizer_summarizer = BertTokenizerFast.from_pretrained(
-    "mrm8488/bert-small2bert-small-finetuned-cnn_daily_mail-summarization"
-)
-model_summarizer = EncoderDecoderModel.from_pretrained(
-    "mrm8488/bert-small2bert-small-finetuned-cnn_daily_mail-summarization"
-).to(device)
+MAX_SESSION_MESSAGES = constants.MAX_SESSION_MESSAGES
+ALLOWED_TOOLS = constants.ALLOWED_TOOLS
 
 _audio_cache = {}
-
-
-# =======================================================================
-# PLACES Database (NOW A CACHE)
-# =======================================================================
-# This will be filled from MongoDB at startup
 PLACES_CACHE = []
 
 # =======================================================================
@@ -105,39 +91,6 @@ def session_add_message(conversation_id: str, role: str, text: str):
 def session_get_messages(conversation_id: str):
     return SESSION_STORE.get(conversation_id, {}).get("messages", [])
 
-def session_set_embedding(conversation_id: str, emb: List[float]):
-    SESSION_STORE.setdefault(conversation_id, {"messages": [], "embedding": None})["embedding"] = emb
-
-def session_get_embedding(conversation_id: str):
-    return SESSION_STORE.get(conversation_id, {}).get("embedding")
-
-# --- Stricter grok_generate prompt ---
-async def grok_generate(prompt: str, max_tokens: int = 400, temperature: float = 0.0):
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    payload = {
-        "model": OPENROUTER_MODEL,
-        "messages": [
-            {"role": "system", "content": "You are a JSON-only API. You MUST respond with ONLY a valid JSON object. Do not add any text, greetings, or explanations before or after the JSON block."},
-            {"role": "user", "content": prompt}
-        ],
-        "max_tokens": max_tokens,
-        "temperature": temperature
-    }
-    headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        r = await client.post(url, headers=headers, json=payload)
-        r.raise_for_status()
-        resp = r.json()
-        return resp["choices"][0]["message"]["content"]
-
-async def get_embedding(text: str) -> List[float]:
-    key = _hash_embed_key(text) 
-    if key in EMBED_CACHE:
-        return EMBED_CACHE[key]
-    emb = await run_sync(embedder.encode, text, convert_to_numpy=True)
-    EMBED_CACHE[key] = emb.tolist()
-    return emb.tolist()
-
 def extract_json(text: str) -> Optional[str]:
     start = text.find("{")
     if start == -1: return None
@@ -159,27 +112,123 @@ def verify_plan(plan: Dict[str, Any]) -> (bool, str):
             return False, "unsafe params"
     return True, "ok"
 
-# --- This function is now used again ---
 def triple_text(place):
-    """Builds simple triple strings for relation embedding"""
     triples = []
-    # Use the 'place_id' (which is the MongoDB _id) as the subject
     subject_id = place.get('place_id', 'unknown') 
-    
     for rel in place.get("related_places", []):
         triples.append(f"{subject_id} related_to {rel}")
     triples.append(f"{subject_id} is_a {place.get('category','place')}")
     return " . ".join(triples)
 
-# --- MODIFIED index_places FUNCTION (with Relation Embedding) ---
+# =======================================================================
+# Cloud Model API Calls
+# =======================================================================
+
+async def grok_generate(prompt: str, max_tokens: int = 400, temperature: float = 0.0):
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    payload = {
+        "model": PLANNER_MODEL,
+        "messages": [
+            {"role": "system", "content": "You are a JSON-only API. You MUST respond with ONLY a valid JSON object. Do not add any text, greetings, or explanations before or after the JSON block."},
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": max_tokens,
+        "temperature": temperature
+    }
+    headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=httpx.Timeout(constants.LLM_TIMEOUT)) as client:
+        r = await client.post(url, headers=headers, json=payload)
+        r.raise_for_status()
+        resp = r.json()
+        return resp["choices"][0]["message"]["content"]
+
+async def get_embedding(text: str) -> List[float]:
+    key = _hash_embed_key(text) 
+    if key in EMBED_CACHE:
+        return EMBED_CACHE[key]
+        
+    url = "https://openrouter.ai/api/v1/embeddings"
+    payload = {
+        "model": EMBED_MODEL,
+        "input": text
+    }
+    headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
+    
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(constants.LLM_TIMEOUT)) as client:
+            r = await client.post(url, headers=headers, json=payload)
+            r.raise_for_status()
+            emb = r.json()["data"][0]["embedding"]
+    except Exception as e:
+        print(f"Embedding API error ({e}), using fallback zero-vector.")
+        emb = [0.0] * 1536
+        
+    EMBED_CACHE[key] = emb
+    return emb
+
+async def summarize_local(text: str, style: str = "summary", lang: str = "en") -> dict:
+    prompt = f"""
+    You are a summarization agent. Summarize the following text in a '{style}' style. 
+    If style is 'map_pin', keep it under 30 words. If 'summary', 40-80 words. If 'deep', 80-200 words.
+    Output ONLY valid JSON with keys: 'summary' (string), 'warnings' (array of strings if data is missing).
+    
+    Text: {text}
+    """
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    payload = {
+        "model": SUMMARIZER_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "response_format": {"type": "json_object"}
+    }
+    headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
+    
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            r = await client.post(url, headers=headers, json=payload)
+            r.raise_for_status()
+            out_text = r.json()["choices"][0]["message"]["content"]
+            
+        j_str = extract_json(out_text) or out_text
+        data = json.loads(j_str)
+        summary_text = data.get("summary", "")
+        warnings = data.get("warnings", [])
+        confidence = 0.95
+    except Exception as e:
+        print(f"Summarizer failed: {e}")
+        summary_text = "Could not generate summary."
+        warnings = ["Summarization API error."]
+        confidence = 0.0
+
+    return {
+        "summary": summary_text.strip(), "style": style, "lang": lang,
+        "confidence": confidence, "warnings": warnings
+    }
+
+async def tts_local(text: str, voice="default", style="neutral", fmt="mp3", bucket=None) -> dict:
+    text_hash = hashlib.md5(f"{text}|{voice}|{style}".encode("utf-8")).hexdigest()
+    filename = f"{text_hash[:12]}.{fmt}"
+    temp_dir = tempfile.gettempdir() 
+    filepath = os.path.join(temp_dir, filename)
+    url = f"/static/{filename}"
+    
+    if text_hash in _audio_cache and os.path.exists(_audio_cache[text_hash]["audio_file"]):
+        return _audio_cache[text_hash]
+            
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, lambda: gTTS(text=text, lang=config.TTS_LANGUAGE, slow=config.TTS_SLOW).save(filepath))
+    
+    result = {"audio_file": filepath, "audio_url": url, "voice": voice, "style": style}
+    _audio_cache[text_hash] = {**result, "expiry": datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=6)}
+    return result
+
+# =======================================================================
+# Retrieval & Indexing Logic
+# =======================================================================
+
 async def index_places():
-    """
-    Fetch places from MongoDB, transform them, compute embeddings,
-    and fill the global PLACES_CACHE.
-    """
     print("Fetching places from MongoDB...")
     global PLACES_CACHE
-    PLACES_CACHE = [] # Clear cache on startup
+    PLACES_CACHE = []
     
     mongo_places = list(places_collection.find({}))
     print(f"Found {len(mongo_places)} documents in MongoDB.")
@@ -189,19 +238,16 @@ async def index_places():
             place_data = {
                 "place_id": str(doc['_id']),
                 "name": doc.get('name', 'Unknown Place'),
-                "full_text": doc.get('description', ''), # Map description to full_text
+                "full_text": doc.get('description', ''),
                 "category": doc.get('type', 'Unknown'),
                 "location": doc.get('location'),
                 "imageUrl": doc.get('imageUrl'),
-                "related_places": doc.get('related_places', []) # <-- Get related_places
+                "related_places": doc.get('related_places', [])
             }
 
-            # 1. Compute and add the text embedding
             text_to_embed = f"{place_data['name']}: {place_data['full_text']}"
-            emb = await get_embedding(text_to_embed)
-            place_data["embedding"] = emb
+            place_data["embedding"] = await get_embedding(text_to_embed)
             
-            # 2. Compute and add the relation embedding
             rel_text = triple_text(place_data)
             place_data["relation_embedding"] = await get_embedding(rel_text)
             
@@ -210,33 +256,22 @@ async def index_places():
         except Exception as e:
             print(f"Warning: Failed to process document {doc.get('_id')}: {e}")
 
-    print(f"Indexed {len(PLACES_CACHE)} places from MongoDB (with relation embeddings).")
-    if PLACES_CACHE:
-        print("Sample:", PLACES_CACHE[0]['name'])
-# --- END OF MODIFICATION ---
+    print(f"Indexed {len(PLACES_CACHE)} places from MongoDB.")
+
 
 def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
     if np.linalg.norm(a) == 0 or np.linalg.norm(b) == 0:
         return 0.0
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
-# --- MODIFIED retrieve_local FUNCTION (with Relation Embedding) ---
+
 async def retrieve_local(query: str, k: int = 3, allow_wiki_fallback: bool = True):
-    """
-    Hybrid local retrieval (using both embeddings).
-    Returns list of source objects that include imageUrl when available.
-    """
     global PLACES_CACHE
     if not PLACES_CACHE:
-        print("Warning: PLACES_CACHE is empty. Seeding again...")
         await index_places()
-        if not PLACES_CACHE:
-            print("Error: PLACES_CACHE is still empty after re-seeding.")
-            return []
+        if not PLACES_CACHE: return []
 
-    # compute query embedding
     query_emb = np.array(await get_embedding(query), dtype=float)
-
     scored = []
     best_score = 0.0
 
@@ -245,30 +280,21 @@ async def retrieve_local(query: str, k: int = 3, allow_wiki_fallback: bool = Tru
         score_main = cosine_sim(query_emb, place_emb)
 
         rel_emb = place.get("relation_embedding")
-        score_rel = 0.0
-        if rel_emb is not None:
-            score_rel = cosine_sim(query_emb, np.array(rel_emb))
+        score_rel = cosine_sim(query_emb, np.array(rel_emb)) if rel_emb is not None else 0.0
 
         combined_score = 0.7 * score_main + 0.3 * score_rel
         scored.append((combined_score, place))
         best_score = max(best_score, combined_score)
 
-    # sort top-k
     scored.sort(key=lambda x: x[0], reverse=True)
     top_local = []
     for sc, place in scored[:k]:
         top_local.append({
-            "id": place["place_id"],
-            "name": place["name"],
-            "full_text": place["full_text"],
-            "category": place.get("category"),
-            "location": place.get("location"),
-            "imageUrl": place.get("imageUrl"),   # local DB imageUrl (may be None)
-            "score": float(sc),
-            "source": "localDB"
+            "id": place["place_id"], "name": place["name"], "full_text": place["full_text"],
+            "category": place.get("category"), "location": place.get("location"),
+            "imageUrl": place.get("imageUrl"), "score": float(sc), "source": "localDB"
         })
 
-    # Wikipedia fallback: add 1 wiki result with imageUrl when needed
     if allow_wiki_fallback and (best_score < 0.65 or len(top_local) < k):
         try:
             search_results = await run_sync(wikipedia.search, query)
@@ -277,105 +303,31 @@ async def retrieve_local(query: str, k: int = 3, allow_wiki_fallback: bool = Tru
                 try:
                     page = await run_sync(wikipedia.page, best_title, auto_suggest=False)
                 except wiki_exceptions.DisambiguationError:
-                    # try second result if disambiguation
-                    if len(search_results) > 1:
-                        best_title = search_results[1]
-                        page = await run_sync(wikipedia.page, best_title, auto_suggest=False)
-                    else:
-                        page = None
+                    page = await run_sync(wikipedia.page, search_results[1], auto_suggest=False) if len(search_results) > 1 else None
 
                 if page:
                     wiki_text = page.summary or (page.content[:2000] if hasattr(page, "content") else "")
-                    # try to pick a good image from page.images
                     wiki_image = None
-                    images = []
-                    try:
-                        images = getattr(page, "images", []) or []
-                        for img_url in images:
-                            lower = img_url.lower()
-                            if lower.endswith((".jpg", ".jpeg", ".png")) and all(x not in lower for x in ("logo", "icon", "badge")):
-                                wiki_image = img_url
-                                break
-                        if not wiki_image and images:
-                            wiki_image = images[0]
-                    except Exception:
-                        wiki_image = None
+                    images = getattr(page, "images", []) or []
+                    for img_url in images:
+                        lower = img_url.lower()
+                        if lower.endswith((".jpg", ".jpeg", ".png")) and all(x not in lower for x in ("logo", "icon", "badge")):
+                            wiki_image = img_url
+                            break
+                    if not wiki_image and images: wiki_image = images[0]
 
                     top_local.append({
-                        "id": f"wiki::{page.title}",
-                        "name": page.title,
-                        "full_text": wiki_text[:1200],
-                        "category": "Wikipedia",
-                        "score": 0.5,
-                        "source": "wikipedia",
-                        "imageUrl": wiki_image,   # <-- add wiki image here (may be None)
-                        "images": images
+                        "id": f"wiki::{page.title}", "name": page.title, "full_text": wiki_text[:1200],
+                        "category": "Wikipedia", "score": 0.5, "source": "wikipedia",
+                        "imageUrl": wiki_image, "images": images
                     })
-                    print(f"✅ Wikipedia fallback added: {page.title} (image: {bool(wiki_image)})")
-            else:
-                print(f"⚠️ No Wikipedia results found for '{query}'.")
-        except wiki_exceptions.PageError:
-            print(f"⚠️ Wikipedia PageError: No page found for '{query}'.")
         except Exception as e:
             print(f"Wikipedia error: {e}")
 
     return top_local
 
-
-# --- END OF MODIFICATION ---
-
-def _hash_text(text, voice="default", style="neutral"):
-    combined = f"{text}|{voice}|{style}"
-    return hashlib.md5(combined.encode("utf-8")).hexdigest()
-
-async def summarize_local(text: str, style: str = "summary", lang: str = "en") -> dict:
-    # (This function is unchanged)
-    length_map = { "map_pin": (15, 30), "summary": (40, 80), "deep": (80, 200), }
-    min_len, max_len = length_map.get(style, (40, 80))
-    inputs = tokenizer_summarizer(
-        [text], padding="max_length", truncation=True, max_length=512, return_tensors="pt"
-    )
-    input_ids = inputs.input_ids.to(device)
-    attention_mask = inputs.attention_mask.to(device)
-    loop = asyncio.get_event_loop()
-    output_ids = await loop.run_in_executor(
-        None,
-        lambda: model_summarizer.generate(
-            input_ids, attention_mask=attention_mask, max_length=max_len, min_length=min_len
-        )
-    )
-    summary_text = tokenizer_summarizer.decode(output_ids[0], skip_special_tokens=True)
-    confidence = 0.95
-    warnings = []
-    if any(keyword in text.lower() for keyword in ["year", "built", "founded"]):
-        if not any(keyword in summary_text.lower() for keyword in ["year", "built", "founded"]):
-            confidence = 0.7
-            warnings.append("Key facts may be missing (e.g., year/date).")
-    return {
-        "summary": summary_text.strip(), "style": style, "lang": lang,
-        "length_label": f"{min_len}-{max_len} tokens", "confidence": confidence, "warnings": warnings
-    }
-
-async def tts_local(text: str, voice="default", style="neutral", fmt="mp3", bucket=None) -> dict:
-    # (This function is unchanged, already has Windows fix)
-    text_hash = _hash_text(text, voice, style)
-    filename = f"{text_hash[:12]}.{fmt}"
-    temp_dir = tempfile.gettempdir() 
-    filepath = os.path.join(temp_dir, filename)
-    url = f"/static/{filename}"
-    if text_hash in _audio_cache:
-        if os.path.exists(_audio_cache[text_hash]["audio_file"]):
-            return _audio_cache[text_hash]
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(
-        None, lambda: gTTS(text=text, lang="en").save(filepath)
-    )
-    result = {"audio_file": filepath, "audio_url": url, "voice": voice, "style": style}
-    _audio_cache[text_hash] = {**result, "expiry": datetime.datetime.utcnow() + datetime.timedelta(hours=6)}
-    return result
-
 # =======================================================================
-# Agent Logic Functions (Unchanged, prompts are already fixed)
+# Agent Orchestration Logic
 # =======================================================================
 
 async def get_json_plan_from_llm(user_text, user_profile_summary, conversation):
@@ -384,150 +336,110 @@ async def get_json_plan_from_llm(user_text, user_profile_summary, conversation):
         You must create a JSON plan with a "steps" key to answer the user's question.
         Available tools: {json.dumps(list(ALLOWED_TOOLS))}
         
-        1.  If the question is a simple greeting (like "hi", "hello"), return:
-            {{"steps": []}}
-        
-        2.  If the question is about tourist info (like "tell me about Marina Beach"), you MUST use the "retrieve" and "summarize" tools.
-            Example: {{"steps": [
-                {{"tool": "retrieve", "input": "information about Marina Beach", "params": {{"k": 3}}}},
-                {{"tool": "summarize", "input": "retrieved context"}}
-            ]}}
+        1. If simple greeting (like "hi", "hello"), return: {{"steps": []}}
+        2. If tourist info requested, you MUST use "retrieve" and "summarize" tools.
+        Example: {{"steps": [{{"tool": "retrieve", "input": "...", "params": {{"k": 3}}}}, {{"tool": "summarize", "input": "retrieved context"}}]}}
         
         User Question: "{user_text}"
-        Conversation History: {conversation}
-        
-        Your JSON response:
+        Conversation: {conversation}
         """
         out_text = await grok_generate(prompt, max_tokens=400)
-        plan_str = extract_json(out_text)
+        plan = json.loads(extract_json(out_text) or '{"steps": []}')
         
-        if not plan_str:
-             print(f"⚠️ No JSON found in LLM output. Assuming chit-chat.")
-             return {"steps": []}
-        
-        plan = json.loads(plan_str)
-        if "steps" not in plan or not isinstance(plan["steps"], list):
-            print("⚠️ LLM returned invalid plan, using fallback plan.")
-            raise ValueError("Invalid plan structure")
-        if not plan["steps"]:
-            return plan
         ok, msg = verify_plan(plan)
-        if not ok:
-            print(f"⚠️ Plan verification warning: {msg}. Using fallback.")
-            raise ValueError(f"Plan verification failed: {msg}")
+        if not ok: raise ValueError(msg)
         return plan
-    except Exception as e:
-        print(f"⚠️ Planning failed: {e}. Using fallback plan.")
-        return {
-            "steps": [
-                {"tool": "retrieve", "input": user_text, "params": {"k": 3}},
-                {"tool": "summarize", "input": "retrieved context"}
-            ]
-        }
+    except Exception:
+        return {"steps": [{"tool": "retrieve", "input": user_text, "params": {"k": 3}}, {"tool": "summarize", "input": "retrieved context"}]}
+
 
 async def execute_step(step: Dict[str, Any], session_ctx: Dict[str, Any]):
-    # (This function is unchanged)
     tool = step.get("tool", "").lower()
     inp = step.get("input")
     params = step.get("params", {})
-    result = None
+    
     if tool == "retrieve":
-        retrieve_kwargs = { "k": params.get("k", 3), "allow_wiki_fallback": True }
-        result = await retrieve_local(inp, **retrieve_kwargs)
-        return result
+        return await retrieve_local(inp, k=params.get("k", 3), allow_wiki_fallback=True)
     elif tool == "summarize":
-        result = await summarize_local(inp)
+        return await summarize_local(inp)
     elif tool == "tts":
-        result = await tts_local(inp, voice=params.get("voice", "female_en_in"), fmt=params.get("format", "mp3"))
+        return await tts_local(inp, voice=params.get("voice", "female_en_in"), fmt=params.get("format", "mp3"))
     elif tool == "embed":
-        emb = await get_embedding(inp)
-        return {"embedding": emb}
-    else:
-        result = {"error": f"tool {tool} not implemented"}
-    return result
+        return {"embedding": await get_embedding(inp)}
+    
+    return {"error": f"tool {tool} not implemented"}
+
 
 async def compose_final_answer(exec_results: List[Dict[str, Any]], user_text: str, user_profile_summary: str):
-    # (This function is unchanged)
     sources = []
     for item in exec_results:
         step, res = item["step"], item["result"]
-        if step["tool"].lower() == "retrieve" and isinstance(res, list):
+        if step["tool"] == "retrieve" and isinstance(res, list):
             sources.extend(res)
-        elif step["tool"].lower() == "summarize" and isinstance(res, dict) and "summary" in res:
-            pass
+            
     sources_sorted = sorted(sources, key=lambda x: x.get("score", 0), reverse=True)[:5]
     avg_score = mean([s.get("score", 0) for s in sources_sorted]) if sources_sorted else 0.0
-    sources_text = "\n".join([
-        f"PLACE {i+1}: {s.get('name')} ({s.get('score', 0):.3f}) – {s.get('full_text', s.get('excerpt', '...'))}"
-        for i, s in enumerate(sources_sorted)
-    ]) or "No sources."
+    sources_text = "\n".join([f"PLACE: {s.get('name')} – {s.get('full_text')}" for s in sources_sorted]) or "No sources."
     
     prompt = f"""
-    You are a JSON-only API. You must answer the user's question based *only* on the provided SOURCES.
-    If SOURCES is "No sources.", just have a friendly conversation (e.g., if user said "hello", say "hello" back).
-    
+    You are a JSON-only API. Answer the user's question based *only* on SOURCES.
+    If "No sources.", have a friendly conversation.
     User Question: {user_text}
-    SOURCES:
-    {sources_text}
-    
-    Your JSON response: {{"answer": "...", "sources": ["..."], "confidence": 0.0}}
+    SOURCES: {sources_text}
+    Response Format: {{"answer": "...", "sources": ["..."], "confidence": 0.0}}
     """
     
-    out_text = await grok_generate(prompt, max_tokens=300)
-    j = extract_json(out_text) or out_text
+    fallback_mode = False
     try:
-        out = json.loads(j)
-    except:
-        fallback_answer = "Your response is ready..."
-        if not sources_text or sources_text == "No sources.":
-            fallback_answer = "Hello! How can I help you today?"
-        out = {"answer": fallback_answer, "sources": sources_sorted, "confidence": 0.1}
-    if "confidence" not in out:
-        out["confidence"] = avg_score
-    if "sources" not in out:
-        out["sources"] = sources_sorted
+        out_text = await asyncio.wait_for(grok_generate(prompt, max_tokens=300), timeout=constants.LLM_TIMEOUT)
+        out = json.loads(extract_json(out_text) or out_text)
+    except Exception as e:
+        print(f"LLM final generation failed ({e}), switching to local DB fallback mode.")
+        fallback_mode = True
+        if sources_sorted:
+            fallback_answer = (
+                f"Here is information from our local heritage database:\n\n" +
+                "\n\n".join(f"• **{s.get('name', 'Site')}**: {s.get('full_text', '')}" for s in sources_sorted[:3])
+            )
+        else:
+            fallback_answer = "Hello! How can I help you explore heritage sites today?"
+        out = {"answer": fallback_answer, "sources": sources_sorted, "confidence": 0.7 if sources_sorted else 0.1}
+        
+    out.setdefault("confidence", avg_score)
+    out.setdefault("sources", sources_sorted)
+    out["fallback_mode"] = fallback_mode
     return out
 
-async def orchestrate(text: str,
-                      user_id: Optional[str] = None,
-                      location: Optional[Dict[str, float]] = None,
-                      conversation_id: Optional[str] = None):
-    # (This function is unchanged)
+
+async def orchestrate(text: str, user_id: Optional[str] = None, location: Optional[Dict[str, float]] = None, conversation_id: Optional[str] = None):
     conv = conversation_id or f"user:{user_id or 'anon'}"
     session_add_message(conv, "user", text)
-    user_profile_summary = "{}"
-    messages_ctx = session_get_messages(conv)
-    plan = await get_json_plan_from_llm(text, user_profile_summary, messages_ctx)
+    
+    plan = await get_json_plan_from_llm(text, "{}", session_get_messages(conv))
     exec_results = []
     context_for_summary = []
-    if plan.get("steps"):
-        print(f"Executing plan with {len(plan['steps'])} steps.")
-        for step in plan.get("steps", []):
-            inp = step.get("input")
-            if step.get("tool") == "summarize" and inp == "retrieved context":
-                inp = json.dumps(context_for_summary) 
-                step["input"] = inp 
-            res = await execute_step(step, session_ctx={"user_id": user_id})
-            if step.get("tool") == "retrieve" and isinstance(res, list):
-                context_for_summary.extend(res)
-            exec_results.append({"step": step, "result": res})
-    else:
-        print("Plan is empty, handling as chit-chat.")
-    final = await compose_final_answer(exec_results, text, user_profile_summary)
+    
+    for step in plan.get("steps", []):
+        if step.get("tool") == "summarize" and step.get("input") == "retrieved context":
+            step["input"] = json.dumps(context_for_summary) 
+        res = await execute_step(step, session_ctx={"user_id": user_id})
+        if step.get("tool") == "retrieve" and isinstance(res, list):
+            context_for_summary.extend(res)
+        exec_results.append({"step": step, "result": res})
+        
+    final = await compose_final_answer(exec_results, text, "{}")
     session_add_message(conv, "assistant", final.get("answer", ""))
-    audio_url = None
-    for it in exec_results:
-        if it["step"]["tool"].lower() == "tts":
-            audio_url = it["result"].get("audio_file") 
-    if audio_url is None and final.get("answer"):
+    
+    audio_url = next((it["result"].get("audio_file") for it in exec_results if it["step"]["tool"] == "tts"), None)
+    if not audio_url and final.get("answer"):
         try:
-            tts_res = await tts_local(final["answer"])
-            audio_url = tts_res.get("audio_file")
-        except Exception as e:
-            print(f"Auto-TTS failed: {e}")
+            audio_url = (await tts_local(final["answer"])).get("audio_file")
+        except Exception: pass
+            
     return {
         "answer": final["answer"], "sources": final["sources"], "confidence": final["confidence"],
-        "audio_url": audio_url, "plan": plan, "execution": exec_results
+        "audio_url": audio_url, "plan": plan, "execution": exec_results,
+        "fallback_mode": final.get("fallback_mode", False)
     }
 
 
@@ -539,52 +451,64 @@ import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app):
+    ai_logger.info("Seeding local places database from MongoDB...")
+    await index_places()
+    ai_logger.info("Database seeding completed successfully.")
+    yield
+    ai_logger.info("Shutting down AI server...")
+
+app = FastAPI(lifespan=lifespan)
+
+# 0. Request ID & Observability Logging Middleware
+app.add_middleware(FastAPILoggingMiddleware, service_name="python-ai-server")
+
+# 1. Rate limiting middleware for AI Server
+app.add_middleware(FastAPIRateLimitMiddleware, window_seconds=900, max_requests=60)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=config.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-class ChatRequest(BaseModel):
-    message: str
-    userId: str = "default-user"
-    conversationId: str = "default-convo"
 
+@app.get("/api/health")
+async def health_check():
+    return {"status": "ok", "places_indexed": len(PLACES_CACHE)}
 
-@app.on_event("startup")
-async def startup_event():
-    print("🌍 Seeding local places database...")
-    await index_places() # This will now connect to MongoDB
-    print("✅ Database seeded.")
+@app.post("/api/reindex")
+async def reindex_endpoint():
+    try:
+        await index_places()
+        return {"status": "ok", "places_indexed": len(PLACES_CACHE)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
-
-@app.post("/api/chat")
+@app.post("/api/chat", response_model=AIResponse)
 async def handle_chat_message(request: ChatRequest):
     try:
-        response_data = await orchestrate(
-            text=request.message,
-            user_id=request.userId,
-            location=None, 
-            conversation_id=request.conversationId
-        )
-        return response_data
-        
+        if not PLACES_CACHE:
+            await index_places()
+        result = await orchestrate(request.message, request.userId, request.location, request.conversationId)
+        return AIResponse(**result)
     except Exception as e:
-        print(f"Error in chat endpoint: {e}")
-        return {
-            "answer": "Sorry, an error occurred on my end.",
-            "sources": [],
-            "confidence": 0.0,
-            "audio_url": None,
-            "plan": None,
-            "execution": None
-        }
+        ai_logger.error(f"Error in chat endpoint: {e}")
+        return AIResponse(
+            answer="Sorry, an error occurred on my end.",
+            sources=[],
+            confidence=0.0,
+            audio_url=None,
+            plan=None,
+            execution=None,
+            fallback_mode=True
+        )
 
 if __name__ == "__main__":
-    print("Starting Python AI Bot server on http://localhost:5001")
-    uvicorn.run(app, host="0.0.0.0", port=5001)
+    ai_logger.info(f"Starting Python AI Bot server on http://{config.FASTAPI_HOST}:{config.FASTAPI_PORT}")
+    uvicorn.run(app, host=config.FASTAPI_HOST, port=config.FASTAPI_PORT)

@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import placeholder from '../images/placeholder.png';
+import config from '../config';
 
-const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:5000';
+const API_BASE = config.apiURL;
 
 const Placecard = ({ place }) => {
   // Prefer explicit imageUrl (DB-provided), else backend stream, else placeholder
@@ -13,7 +14,6 @@ const Placecard = ({ place }) => {
 
   useEffect(() => {
     setSrc(place.imageUrl || `${API_BASE}/api/places/${place._id}/image`);
-    console.log(`[Placecard] src for ${place.name}:`, place.imageUrl || `${API_BASE}/api/places/${place._id}/image`);
   }, [place._id, place.imageUrl, place.name]);
 
   const handleError = () => {
