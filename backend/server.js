@@ -68,7 +68,9 @@ app.use('/api/users', userRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/api/places', placeRoutes);
 
-// Health check route
+// Health check routes
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'thamizh-thadam-backend' }));
+app.get('/api/health', (req, res) => res.json({ status: 'ok', service: 'thamizh-thadam-backend' }));
 app.get('/ping', (req, res) => res.json({ ok: true }));
 
 // MongoDB connection and server start

@@ -244,6 +244,11 @@ def find_path():
         "intermediate_sites": path[1:-1]
     })
 
+@app.route("/", methods=["GET", "HEAD"])
+@app.route("/api/health", methods=["GET"])
+def health_check():
+    return jsonify({"status": "ok", "service": "thamizh-thadam-route-planner"})
+
 # ---- Run Server ---- #
 if __name__ == "__main__":
     route_logger.info(f"Starting Python Route Planner server on http://{config.FLASK_HOST}:{config.FLASK_PORT}")

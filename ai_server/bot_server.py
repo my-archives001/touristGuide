@@ -478,6 +478,11 @@ app.add_middleware(
 )
 
 
+@app.get("/")
+@app.head("/")
+async def root():
+    return {"status": "ok", "service": "thamizh-thadam-ai-bot", "places_indexed": len(PLACES_CACHE)}
+
 @app.get("/api/health")
 async def health_check():
     return {"status": "ok", "places_indexed": len(PLACES_CACHE)}
