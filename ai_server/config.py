@@ -25,12 +25,12 @@ class Config:
     TTS_SLOW = os.getenv("TTS_SLOW", "false").lower() == "true"
 
     # CORS
-    CORS_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5002,http://localhost:3001,http://127.0.0.1:3000,http://127.0.0.1:5002").split(",")]
+    CORS_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "https://tourist-guide-two.vercel.app,http://localhost:3000,http://localhost:5002,http://localhost:3001,http://127.0.0.1:3000,http://127.0.0.1:5002").split(",")]
 
     # Ports & Hosts
-    FASTAPI_PORT = int(os.getenv("FASTAPI_PORT", "5001"))
+    FASTAPI_PORT = int(os.getenv("PORT", os.getenv("FASTAPI_PORT", "5001")))
     FASTAPI_HOST = os.getenv("FASTAPI_HOST", "0.0.0.0")
-    FLASK_PORT = int(os.getenv("FLASK_PORT", "8000"))
+    FLASK_PORT = int(os.getenv("PORT", os.getenv("FLASK_PORT", "8000")))
     FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
     FLASK_DEBUG = os.getenv("FLASK_DEBUG", "true").lower() == "true"
 

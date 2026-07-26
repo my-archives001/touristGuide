@@ -1,0 +1,42 @@
+services:
+  # 1. Node.js Express Backend
+  - type: web
+    name: thamizh-thadam-backend
+    runtime: node
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: node server.js
+    plan: free
+    envVars:
+      - key: MONGO_URI
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CORS_ORIGINS
+        value: https://tourist-guide-two.vercel.app
+
+  # 2. Python AI Bot Server (FastAPI)
+  - type: web
+    name: thamizh-thadam-ai-bot
+    runtime: docker
+    rootDir: ai_server
+    dockerfilePath: ./Dockerfile.bot
+    plan: free
+    envVars:
+      - key: MONGO_URI
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        value: https://tourist-guide-two.vercel.app
+
+  # 3. Python Route Planner Server (Flask)
+  - type: web
+    name: thamizh-thadam-route-planner
+    runtime: docker
+    rootDir: ai_server
+    dockerfilePath: ./Dockerfile.route
+    plan: free
+    envVars:
+      - key: CORS_ORIGINS
+        value: https://tourist-guide-two.vercel.app
