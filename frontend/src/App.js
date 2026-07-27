@@ -1,8 +1,9 @@
-import React, { useState, useContext, Suspense } from 'react';
+import React, { useState, useContext, Suspense, useEffect } from 'react';
 import logo from './images/logo2.jpg';
 import { ToastContainer } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 import { AuthContext } from './context/AuthContext.js';
+import config from './config';
 
 import Spinner from './Essentials/Spinner';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -22,6 +23,16 @@ function App() {
   // Use AuthContext as single source of truth for auth state
   const { userInfo } = useContext(AuthContext);
   const isUserLogged = !!userInfo;
+
+  // Wake up backend instances if they are sleeping (e.g. on Render free tier)
+  useEffect(() => {
+    const wakeUpBackends = () => {
+      fetch(`${config.apiURL}/ping`).catch(() => { });
+      fetch(`${config.aiURL}/api/health`).catch(() => { });
+      fetch(`${config.routeURL}/`).catch(() => { });
+    };
+    wakeUpBackends();
+  }, []);
 
   const handleSignUp = () => {
     setIsSignUp(true);
